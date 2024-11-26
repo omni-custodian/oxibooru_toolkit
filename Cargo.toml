@@ -1,0 +1,12 @@
+[package]
+name = "oxibooru_toolkit"
+version = "0.0.2"
+edition = "2021"
+
+[dependencies]
+szurubooru-client = "0.6.2"
+tokio = { version = "1.41.1" , features = ['full']}
+serde_json = "1.0.133"
+serde = "1.0.215"
+toml = "0.8.19"
+
