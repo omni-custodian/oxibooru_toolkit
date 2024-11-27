@@ -241,7 +241,6 @@ fn load_or_create_config() -> Result<Config, Box<dyn std::error::Error>> {
             let default_config = r#"
 [server]
 url = "https://your-server-url.com"
-port = 8080
 
 [auth]
 username = "your_username"
