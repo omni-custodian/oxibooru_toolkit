@@ -206,7 +206,6 @@ struct Config {
 #[derive(Deserialize, Debug)]
 struct ServerConfig {
     url: String,
-    port: u16,
 }
 
 #[derive(Deserialize, Debug)]
