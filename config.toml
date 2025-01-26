@@ -1,0 +1,14 @@
+[server]
+url = "http://192.168.200.21:6060"
+
+[auth]
+username = "RemodelerBot"
+token = "20c7e7a0-b620-4d98-973c-c3eb8cae7455"
+
+[settings]
+timeout = 300
+retry_attempts = 0
+log_level = "info"
+skip_on_error = true
+delete_files_in_progress = true
+delete_folder = true

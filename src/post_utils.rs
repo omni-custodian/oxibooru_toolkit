@@ -3,10 +3,12 @@
 use errors::SzurubooruClientError;
 use models::{CreateUpdatePost, PostSafety};
 use serde_json::Value;
+use tokio::fs::File;
+use tokio::io::BufReader;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::Hash;
-use std::io::{Error, Read};
+use std::io::{Read, self, BufRead, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use szurubooru_client::*;
 
@@ -151,7 +153,7 @@ fn make_post_with_metadata(
         if let Some(url) = json_data.get("url").and_then(|u| u.as_str()) {
             post.source = Some(match &post.source {
                 Some(existing_source) => format!("{}\n{}", existing_source, url),
-                None => url.to_string(),
+                none => url.to_string(),
             });
         }
 
@@ -308,4 +310,39 @@ pub fn get_files(path: &str) -> Result<Vec<PathBuf>, SzurubooruClientError> {
     }
 
     Ok(post_files)
+}
+
+pub fn read_number_pairs(file_path: &str) -> Result<Vec<(u32, u32)>, SzurubooruClientError> {
+    let mut number_pairs = Vec::new();
+    let path = Path::new(file_path);
+
+    if path.is_file() {
+        let file = fs::File::open(path).map_err(|e| SzurubooruClientError::IOError(e))?;
+        let reader = io::BufReader::new(file);
+
+        for line in reader.lines() {
+            let line = line.map_err(|e| SzurubooruClientError::IOError(e))?;
+            let numbers: Vec<&str> = line.split_whitespace().collect();
+
+            if numbers.len() == 2 {
+                let first = numbers[0].parse::<u32>().map_err(|_| {
+                    SzurubooruClientError::IOError(Error::new(ErrorKind::InvalidData, "Failed to parse the first number."))
+                })?;
+                let second = numbers[1].parse::<u32>().map_err(|_| {
+                    SzurubooruClientError::IOError(Error::new(ErrorKind::InvalidData, "Failed to parse the second number."))
+                })?;
+                number_pairs.push((first, second));
+            } else {
+                return Err(SzurubooruClientError::IOError(Error::new(
+                    ErrorKind::InvalidData,
+                    "Each line must contain exactly two numbers."
+                )));
+            }
+        }
+    } else {
+        let dir_error: std::io::Error = Error::new(std::io::ErrorKind::Other, "Provided path is not a file");
+        return Err(SzurubooruClientError::IOError(dir_error));
+    }
+
+    Ok(number_pairs)
 }

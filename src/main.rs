@@ -1,19 +1,20 @@
+use errors::SzurubooruClientError;
+use models::MergePost;
 use post_utils::get_files;
 use serde::Deserialize;
-use std::error::Error;
+use std::error::Error as ErrError;
+use std::io::{Error, ErrorKind};
 use std::{env, fs, io};
 use std::path::{Path, PathBuf};
 use szurubooru_client::*;
 use tokio::time::{sleep, Duration};
+use indicatif::{ProgressBar, ProgressStyle};
 
 mod post_utils;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let config = match load_or_create_config() {
-        Ok(cfg) => cfg,
-        Err(e) => return Ok(()),
-    };
+async fn main() -> Result<(), Box<dyn ErrError>> {
+    let config =  load_or_create_config()?;
 
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
@@ -53,6 +54,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             upload_pool(&client, path).await;
             Ok(())
         }
+        "merge" if element == "post" => {
+            match merge_posts(&client, path, config).await {
+                Ok(_) => println!("Finished merging posts."),
+                Err(e) => eprintln!("Error merging posts: {}", e),
+            }
+            Ok(())
+        }
         _ => {
             eprintln!("Invalid operation or element");
             Ok(())
@@ -83,16 +91,19 @@ async fn upload_posts(client: &SzurubooruClient, path: &str, config: Config) -> 
     let mut post_ids = Vec::new();
     let mut artists = Vec::new();
     let total_files_num = files.len();
+
     for (count, file) in files.iter().enumerate() {
         let mut retries = 0;
         let mut delay = Duration::from_millis(100);
-        println!("Uploading {} | {}/{}",file.to_string_lossy(),count+1,total_files_num);
+        println!("Uploading {} | {}/{}", file.to_string_lossy(), count + 1, total_files_num);
+
         loop {
             match post_utils::create_post(client, &file).await {
                 Ok((post_id, artist)) => {
                     post_ids.push(post_id);
                     artists.push(artist);
-                    println!("Finished {}",file.to_string_lossy());
+                    println!("Finished {}", file.to_string_lossy());
+
                     if config.settings.delete_files_in_progress {
                         match delete_file(file) {
                             Ok(_) => println!("File deleted successfully."),
@@ -114,12 +125,20 @@ async fn upload_posts(client: &SzurubooruClient, path: &str, config: Config) -> 
                     delay += Duration::from_millis(config.settings.timeout);
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Error uploading post for file {}: {}. Max retries reached.",
-                        file.display(),
-                        e
-                    );
-                    return Err(e);
+                    if config.settings.retry_attempts > 1 {
+                        eprintln!(
+                            "Error uploading post for file {}: {}. Max retries reached.",
+                            file.display(),
+                            e
+                        );
+                    }
+
+                    if config.settings.skip_on_error {
+                        eprintln!("Skipping file {} due to error.", file.display());
+                        break; // Skip to the next file
+                    } else {
+                        return Err(e); // Ensure the function exits with an error
+                    }
                 }
             }
         }
@@ -127,6 +146,7 @@ async fn upload_posts(client: &SzurubooruClient, path: &str, config: Config) -> 
         // Wait before uploading the next file
         sleep(Duration::from_millis(config.settings.timeout)).await;
     }
+
     println!("Finished");
     if config.settings.delete_folder {
         match delete_folder(path) {
@@ -137,6 +157,83 @@ async fn upload_posts(client: &SzurubooruClient, path: &str, config: Config) -> 
 
     Ok(post_ids)
 }
+
+async fn merge_posts(client: &SzurubooruClient, path: &str, config: Config) -> SzurubooruResult<Vec<u32>> {
+    let posts_ids: Vec<(u32, u32)> = post_utils::read_number_pairs(path)?;
+    let merged_ids: Vec<u32> = posts_ids.iter().map(|(_, b)| *b).collect();    
+
+    let progress_bar = ProgressBar::new(posts_ids.len() as u64);
+
+    // Define multiple progress styles with different bar colors
+    let success_style = ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.green/green}] {pos}/{len} ({eta})")
+        .expect("Failed to set success progress bar style")
+        .progress_chars("#>-");
+
+    let error_style = ProgressStyle::default_bar()
+        .template("{spinner:.red} [{elapsed_precise}] [{bar:40.red/red}] {pos}/{len} ({eta})")
+        .expect("Failed to set error progress bar style")
+        .progress_chars("#>-");
+
+    let default_style = ProgressStyle::default_bar()
+        .template("{spinner:.cyan} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+        .expect("Failed to set default progress bar style")
+        .progress_chars("#>-");
+
+    progress_bar.set_style(default_style.clone());
+
+    for (remove_post, merge_to_post) in posts_ids {
+        progress_bar.inc(1);
+
+        let result = async {
+            let remove_post_version = client
+                .request()
+                .get_post(remove_post)
+                .await?
+                .version
+                .ok_or_else(|| SzurubooruClientError::IOError(Error::new(ErrorKind::InvalidData, "Missing remove_post version.")))?;
+
+            let merge_to_version = client
+                .request()
+                .get_post(merge_to_post)
+                .await?
+                .version
+                .ok_or_else(|| SzurubooruClientError::IOError(Error::new(ErrorKind::InvalidData, "Missing merge_to_post version.")))?;
+
+            let merge = MergePost {
+                remove_post_version,
+                remove_post,
+                merge_to_version,
+                merge_to_post,
+                replace_post_content: false,
+            };
+
+            client.request().merge_post(&merge).await
+        };
+
+        if let Err(e) = result.await {
+            progress_bar.set_style(error_style.clone()); // Switch to red style on error
+            progress_bar.set_message("Error encountered.");
+            if !config.settings.skip_on_error {
+                progress_bar.finish_with_message("Error encountered.");
+                return Err(e);
+            }
+        } else {
+            progress_bar.set_style(success_style.clone()); // Switch to green style on success
+            progress_bar.set_message("Success");
+        }
+
+        sleep(Duration::from_millis(config.settings.timeout)).await;
+
+        // Reset to default style for the next iteration
+        progress_bar.set_style(default_style.clone());
+    }
+
+    progress_bar.finish_with_message("Merge complete.");
+    Ok(merged_ids)
+}
+
+
 
 fn delete_folder(path: &str) -> io::Result<()> {
     fs::remove_dir(path)
@@ -219,6 +316,7 @@ struct SettingsConfig {
     timeout: u64,
     retry_attempts: u8,
     log_level: String,
+    skip_on_error: bool,
     delete_files_in_progress: bool,
     delete_folder: bool,
 }
@@ -248,6 +346,7 @@ token = "your_auth_token"
 [settings]
 timeout = 30
 retry_attempts = 3
+skip_on_error = false
 log_level = "info"
 delete_files_in_progress = true
 delete_folder = false
@@ -255,10 +354,11 @@ delete_folder = false
 
             // Write default config to file
             fs::write(config_path, default_config)?;
-            println!("Default 'config.toml' file has been created.");
+            println!("Default 'config.toml' file has been created. Exiting program...");
+            std::process::exit(0);
         } else {
             println!("No configuration file created. Exiting...");
-            return Err("Configuration file creation canceled by user.".into());
+            std::process::exit(1);
         }
     }
 
@@ -267,3 +367,4 @@ delete_folder = false
     let config: Config = toml::from_str(&config_data)?;
     Ok(config)
 }
+
